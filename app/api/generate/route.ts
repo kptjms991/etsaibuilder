@@ -78,34 +78,48 @@ export async function POST(request: NextRequest) {
 
     const apiKey = process.env.AIMLAPI_KEY
 
+    console.log("[v0] Generate request received:", { prompt: prompt.substring(0, 50), hasApiKey: !!apiKey, model })
+
     if (!apiKey) {
+      console.log("[v0] No AIMLAPI key found, using fallback generation")
       // Fallback generation when no API key is configured
+      const fallbackFiles = generateProjectFiles(prompt)
+      const mainCode = fallbackFiles.find(f => f.path.includes('page.tsx'))?.content || generateFallbackComponent(prompt)
+      
       return NextResponse.json({
-        code: generateFallbackComponent(prompt),
+        code: mainCode,
         model: "fallback",
         usage: null,
-        files: generateProjectFiles(prompt)
+        files: fallbackFiles,
+        message: "Generated using fallback mode. Add AIMLAPI_KEY environment variable for AI-powered generation."
       })
     }
 
-    // Generate with AIMLAPI
+    // Generate with AI API
     const result = await generateWithAIMLAPI(apiKey, prompt, model, context)
+
+    console.log("[v0] Generation successful, files:", result.files.length)
 
     return NextResponse.json({
       code: result.code,
       model: model || "gpt-4",
       usage: result.usage,
-      files: result.files
+      files: result.files,
+      message: "Generated successfully with AIMLAPI"
     })
   } catch (error) {
     console.error("[v0] Error in generate route:", error)
-    return NextResponse.json(
-      {
-        error: "Failed to generate component",
-        code: generateFallbackComponent(""),
-      },
-      { status: 500 },
-    )
+    
+    const fallbackFiles = generateProjectFiles("error recovery")
+    const mainCode = fallbackFiles.find(f => f.path.includes('page.tsx'))?.content || generateFallbackComponent("Error occurred, showing fallback")
+    
+    return NextResponse.json({
+      code: mainCode,
+      model: "fallback",
+      usage: null,
+      files: fallbackFiles,
+      message: "An error occurred. Showing fallback component. Check console for details."
+    })
   }
 }
 
@@ -158,67 +172,83 @@ ${context ? `\n\nContext from previous messages: ${JSON.stringify(context.slice(
 
 IMPORTANT: Return ONLY the JSON object, nothing else.`
 
-  const response = await fetch(`${AIMLAPI_CONFIG.baseURL}${AIMLAPI_CONFIG.endpoints.chat}`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: enhancedPrompt }
-      ],
-      temperature: 0.7,
-      max_tokens: 8000,
-    }),
-  })
-
-  if (!response.ok) {
-    console.error("[v0] AIMLAPI error:", await response.text())
-    throw new Error("AIMLAPI request failed")
-  }
-
-  const data = await response.json()
-
-  usageTracker.requests++
-  usageTracker.tokens += data.usage?.total_tokens || 0
-
-  const generatedContent = data.choices[0]?.message?.content || ""
-
-  let parsedFiles
-  let mainCode = ""
-  
   try {
-    // Try to extract JSON from the response
-    const jsonMatch = generatedContent.match(/\{[\s\S]*"files"[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0])
-      parsedFiles = parsed.files
-      mainCode = parsedFiles.find((f: any) => f.path.includes('page.tsx'))?.content || parsedFiles[0]?.content || ""
-    } else {
-      // Fallback: extract code blocks and structure them
+    console.log("[v0] Calling AIMLAPI...")
+    
+    const response = await fetch(`${AIMLAPI_CONFIG.baseURL}${AIMLAPI_CONFIG.endpoints.chat}`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: enhancedPrompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 8000,
+      }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error("[v0] AIMLAPI error response:", errorText)
+      throw new Error(`AIMLAPI request failed: ${response.status}`)
+    }
+
+    const data = await response.json()
+    console.log("[v0] AIMLAPI response received, tokens:", data.usage?.total_tokens)
+
+    usageTracker.requests++
+    usageTracker.tokens += data.usage?.total_tokens || 0
+
+    const generatedContent = data.choices[0]?.message?.content || ""
+
+    let parsedFiles
+    let mainCode = ""
+    
+    try {
+      // Try to extract JSON from the response
+      const jsonMatch = generatedContent.match(/\{[\s\S]*"files"[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0])
+        parsedFiles = parsed.files
+        mainCode = parsedFiles.find((f: any) => f.path.includes('page.tsx'))?.content || parsedFiles[0]?.content || ""
+      } else {
+        // Fallback: extract code blocks and structure them
+        console.log("[v0] No JSON found, extracting code blocks")
+        const codeBlocks = extractCodeBlocks(generatedContent)
+        parsedFiles = generateProjectFiles(prompt, codeBlocks[0] || "")
+        mainCode = codeBlocks[0] || generateFallbackComponent(prompt)
+      }
+    } catch (e) {
+      console.error("[v0] JSON parse error:", e)
       const codeBlocks = extractCodeBlocks(generatedContent)
       parsedFiles = generateProjectFiles(prompt, codeBlocks[0] || "")
       mainCode = codeBlocks[0] || generateFallbackComponent(prompt)
     }
-  } catch (e) {
-    console.error("[v0] JSON parse error:", e)
-    const codeBlocks = extractCodeBlocks(generatedContent)
-    parsedFiles = generateProjectFiles(prompt, codeBlocks[0] || "")
-    mainCode = codeBlocks[0] || generateFallbackComponent(prompt)
-  }
 
-  return {
-    code: mainCode,
-    usage: {
-      provider: "AIMLAPI",
-      requests: usageTracker.requests,
-      limit: usageTracker.limit,
-      tokensUsed: data.usage?.total_tokens || 0,
-    },
-    files: parsedFiles
+    return {
+      code: mainCode,
+      usage: {
+        provider: "AIMLAPI",
+        requests: usageTracker.requests,
+        limit: usageTracker.limit,
+        tokensUsed: data.usage?.total_tokens || 0,
+      },
+      files: parsedFiles
+    }
+  } catch (error) {
+    console.error("[v0] AIMLAPI error:", error)
+    // Return fallback on API error
+    const fallbackFiles = generateProjectFiles(prompt)
+    return {
+      code: fallbackFiles.find(f => f.path.includes('page.tsx'))?.content || generateFallbackComponent(prompt),
+      usage: null,
+      files: fallbackFiles
+    }
   }
 }
 

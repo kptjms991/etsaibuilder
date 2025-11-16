@@ -63,6 +63,8 @@ export default function AIBuilderPage() {
     setMessages(prev => [...prev, userMessage])
     setIsGenerating(true)
 
+    console.log("[v0] Sending generation request:", prompt)
+
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
@@ -76,34 +78,35 @@ export default function AIBuilderPage() {
         }),
       })
 
-      if (!response.ok) {
-        throw new Error("Failed to generate component")
-      }
-
       const data = await response.json()
+      console.log("[v0] Received response:", { hasCode: !!data.code, filesCount: data.files?.length, message: data.message })
 
-      // Add AI response
-      const aiMessage = {
-        role: 'assistant',
-        content: `Generated ${data.files?.length || 1} file(s) for your "${prompt}" request.`,
-        timestamp: new Date(),
-        code: data.code
-      }
-      setMessages(prev => [...prev, aiMessage])
-      
-      setGeneratedCode(data.code)
-      setFiles(data.files || [])
-      if (data.files && data.files.length > 0) {
-        setSelectedFile(data.files[0])
-      }
+      if (data.code) {
+        const aiMessage = {
+          role: 'assistant',
+          content: data.message || `Generated ${data.files?.length || 1} file(s) for your "${prompt}" request.`,
+          timestamp: new Date(),
+          code: data.code
+        }
+        setMessages(prev => [...prev, aiMessage])
+        
+        setGeneratedCode(data.code)
+        setFiles(data.files || [])
+        if (data.files && data.files.length > 0) {
+          setSelectedFile(data.files[0])
+        }
 
-      if (data.usage) {
-        await fetchApiUsage()
+        if (data.usage) {
+          await fetchApiUsage()
+        }
+      } else if (data.error) {
+        throw new Error(data.error)
       }
     } catch (error) {
+      console.error("[v0] Generation error:", error)
       const errorMessage = {
         role: 'assistant',
-        content: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        content: `Sorry, I encountered an error: ${error instanceof Error ? error.message : "Unknown error"}. Please try again or rephrase your request.`,
         timestamp: new Date(),
         isError: true
       }
